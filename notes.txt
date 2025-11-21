@@ -1,0 +1,31 @@
+generally width is the highest dimension, opposite of C++
+
+image.shape[0] = slice
+image.shape[1] = height
+image.shape[2] = width
+
+// latent [batch_size, 16, frames -1 // 4 + 1, height // 8, width //8]
+latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], device=comfy.model_management.intermediate_device())
+
+// shape[-1] means the last dimension of the array, so pixel depth maybe?
+image = torch.ones((length, height, width, start_image.shape[-1]), device=start_image.device, dtype=start_image.dtype) * 0.5
+
+
+// [:shape[0]] = start_image shwere shape[0] = the numbber of slices in start image
+image[:start_image.shape[0]] = start_image
+
+
+// movedim(src, dest) move indexes (reshuffle array)
+start_image = comfy.utils.common_upscale(start_image[:length].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+
+
+VHS Load Video Path 
+  - skip first frames gets applied first
+  - then select every nth frame gets applied as if (total frame count % select_nth) != 0 -> continue
+  - frame load cap is applied after all that, you should get frame load cap frames out
+
+  Wan2.1 vae input batch, components, time, height, width (B C T H W)
+
+  Wan 2.1 VAE 
+    - input video of  (1 + T, H, W, C) maps to ( 1 + T//4, H//8, W//8, C)
+    - specifically (1 + T, H, W, 3) maps to (1 + T//4, H//8, W//8, 16)

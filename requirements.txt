@@ -1,0 +1,4 @@
+cv2
+kornia
+scipy
+skimage
