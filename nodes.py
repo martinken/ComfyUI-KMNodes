@@ -6,6 +6,8 @@ from torch import Tensor
 import cv2
 import numpy as np
 import comfy.model_management
+from comfy.utils import ProgressBar
+import folder_paths
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from scipy.optimize import least_squares # for color matching
@@ -185,6 +187,8 @@ class KM_Aspect_Ratio_Selector(io.ComfyNode):
         ("1:1  1M 960x960", 960, 960),
         ("4:3  1M 1088x816", 1088, 816),
         ("16:9 1M 1280x720", 1280, 720),
+        ("21:9 1M 1512x648", 1512, 648),
+        ("21:9 1M 1344x576", 1344, 576),
         ("3:4  1M 816x1088", 816, 1088),
         ("9:16 1M 720x1280", 720, 1280),
         ("4:3      960x720", 960, 720),
@@ -193,9 +197,14 @@ class KM_Aspect_Ratio_Selector(io.ComfyNode):
         ("4:3  2M 1632x1440", 1632, 1224),
         ("3:2  2M 1752x1168", 1752, 1168),
         ("16:9 2M 1920x1080", 1920, 1080),
+        ("21:9 2M 2016x864", 2016, 864),
         ("3:4  2M 1440x1632", 1224, 1632),
         ("2:3  2M 1168x1752", 1168, 1752),
         ("9:16 2M 1080x1920", 1080, 1920),
+        ("1:1  4M 2000x2000", 2000, 2000),
+        ("4:3  4M 2304x1728", 2304, 1728),
+        ("3:2  4M 2448x1632", 2448, 1632),
+        ("16:9 4M 2560x1440", 2560, 1440),
         ("custom", 960, 960),
     ]
 
@@ -227,6 +236,50 @@ class KM_Aspect_Ratio_Selector(io.ComfyNode):
                 if title == aspect_ratio:
                     return (title, w, h)
         return (aspect_ratio, custom_width, custom_height)
+
+class KM_Aspect_Ratio_Selector2(io.ComfyNode):
+    RATIO = [
+        ("21:9", 21, 9),
+        ("16:9", 16, 9),
+        ("3:2", 3, 2),
+        ("4:3", 4, 3),
+        ("1:1", 1, 1),
+        ("3:4", 3, 4),
+        ("2:3", 2, 3),
+        ("9:16", 9, 16),
+        ("9:21", 9, 21),
+    ]
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Aspect_Ratio_Selector2",
+            category="KMNodes",
+            description=
+                "Generates a size based on an aspect ratio and meghapixel count"
+                "The resulting dimensions will be divisible by 16.",
+            inputs=[
+                io.Combo.Input("aspect_ratio",
+                    options=[title for title, _, _ in cls.RATIO],
+                    default=cls.RATIO[0][0],
+                    tooltip="Aspect ratio of generated image.",
+                ),
+                io.Float.Input("megapixels", default=1.0, min=0, max=8, step=0.5, optional=True),
+            ],
+            outputs=[
+                io.String.Output(display_name="ratio"),
+                io.Int.Output(display_name="width"),
+                io.Int.Output(display_name="height"),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, aspect_ratio, megapixels) -> io.NodeOutput:
+        for title, w, h in cls.RATIO:
+            if title == aspect_ratio:
+                factor = 16*int(np.sqrt((megapixels * 1_000_000) / (w * h))/16.0)
+                return (title, w * factor, h * factor)
+        return (aspect_ratio, 512, 512)
 
 class KM_Video_Image_Color_Match(io.ComfyNode):
     @classmethod
@@ -572,6 +625,97 @@ class KM_Downscale_Image(io.ComfyNode):
 
         return (result,)
 
+class KM_Resize_Image(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Resize_Image",
+            category="KMNodes",
+            description=
+                "Resize an image properly to avoid aliasing artifacts. Uses skimage "
+                "which does a proper blur before downsampling and . ",
+            inputs=[
+                io.Image.Input("images"),
+                io.Int.Input("width", default=128, min=0, max=BIGMAX, step=1),
+                io.Int.Input("height", default=128, min=0, max=BIGMAX, step=1),
+            ],
+            outputs=[
+                io.Image.Output(display_name="result"),
+            ]   
+        )
+
+    @classmethod
+    def execute(cls, images, width, height) -> io.NodeOutput:
+        # short circuit
+        if (width == images.size(2)) and (height == images.size(1)):
+            return (images,)
+        
+        # Ensure image and reference are in the correct shape (B, H, W, C)
+        result = torch.empty((images.size(0), height, width, images.size(3)), dtype=images.dtype, layout=images.layout)
+        for i, image in enumerate(images):
+            imagenp = np.array(image)
+            image_resized = resize(imagenp, (height, width), order=3)
+            result[i] = torch.from_numpy(image_resized).unsqueeze(0) 
+
+        return (result,)
+
+class KM_Resize_Image_With_Model(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Resize_Image_With_Model",
+            category="KMNodes",
+            description=
+                "Resize an image using a model to upscale then downscale if needed. "
+                "Batched to reduce memory overhead",
+            inputs=[
+                io.UpscaleModel.Input("upscale_model"),
+                io.Image.Input("images"),
+                io.Int.Input("width", default=128, min=0, max=BIGMAX, step=1),
+                io.Int.Input("height", default=128, min=0, max=BIGMAX, step=1),
+                io.Int.Input("per_batch", default=16, min=1, max=4096, step=1),
+            ],
+            outputs=[
+                io.Image.Output(display_name="result"),
+            ]   
+        )
+
+    @classmethod
+    def execute(self, upscale_model, images, width, height, per_batch):
+        
+        device = comfy.model_management.get_torch_device()
+        upscale_model.to(device)
+        in_img = images.movedim(-1,-3)
+        
+        steps = in_img.shape[0]
+        pbar = ProgressBar(steps)
+        
+        # Ensure image and reference are in the correct shape (B, H, W, C)
+        result = torch.empty((images.size(0), height, width, images.size(3)), dtype=images.dtype, layout=images.layout)
+
+        for start_idx in range(0, in_img.shape[0], per_batch):
+            sub_images = upscale_model(in_img[start_idx:start_idx+per_batch].to(device))
+            # Calculate the number of images processed in this batch
+            batch_count = sub_images.shape[0]
+
+            sub_images = torch.cat(sub_images, dim=0).permute(0, 2, 3, 1).cpu()
+
+            
+            for i, image in enumerate(sub_images):
+                # short circuit
+                if (width == sub_images.size(2)) and (height == sub_images.size(1)):
+                    result[i] = image
+                else:
+                    imagenp = np.array(image)
+                    image_resized = resize(imagenp, (height, width), order=3)
+                    result[i] = torch.from_numpy(image_resized).unsqueeze(0) 
+
+            # Update the progress bar by the number of images processed in this batch
+            pbar.update(batch_count)
+        upscale_model.cpu()
+        
+
+        return (result,)
 
 class KM_WanVideoToVideo(io.ComfyNode):
     @classmethod
@@ -580,22 +724,17 @@ class KM_WanVideoToVideo(io.ComfyNode):
             node_id="KM_WanVideoToVideo",
             category="KMNodes",
             description=
-                "Take an input video and encode it into a latent. This can then be used "
-                "as input to a sampler as an init video similar to image workflows that use "
-                "init images. For example you could take a video generated with Wan and "
-                "and crop a region of it, zoom it, then use this node to feed it back "
-                "into Wan t2v to refine the cropped region or do more "
-                "creative options. Basically all the same operations you would do with an "
-                "init image when using Flux for example. ",
+                "Take an input video and and overlap video and encode it into a latent. "
+                "The overlap video is blended into the start of the video to create a smooth transition. ",
             inputs=[
                 io.Conditioning.Input("positive"),
                 io.Conditioning.Input("negative"),
                 io.Vae.Input("vae"),
-                io.Int.Input("width", default=832, min=16, max=nodes.MAX_RESOLUTION, step=16),
-                io.Int.Input("height", default=480, min=16, max=nodes.MAX_RESOLUTION, step=16),
                 io.Int.Input("length", default=81, min=1, max=nodes.MAX_RESOLUTION, step=4),
                 io.Int.Input("batch_size", default=1, min=1, max=4096),
                 io.Image.Input("video"),
+                io.Image.Input("overlap_video"),
+                io.Int.Input("mask_frames", default=1, min=29, max=4096, optional=True),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -605,34 +744,34 @@ class KM_WanVideoToVideo(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, positive, negative, vae, width, height, length, batch_size, video=None) -> io.NodeOutput:
+    def execute(cls, positive, negative, vae, length, batch_size, video, overlap_video, mask_frames = 0) -> io.NodeOutput:
         # spacial_scale = vae.spacial_compression_encode()
         # latent = torch.zeros([batch_size, vae.latent_channels, ((length - 1) // 4) + 1, height // spacial_scale, width // spacial_scale], device=comfy.model_management.intermediate_device())
-        video = comfy.utils.common_upscale(video[:length].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        # video = comfy.utils.common_upscale(video[:length].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+    
+        mix = np.linspace(1.5, 0.1, num=overlap_video.shape[0], dtype=np.float32).clip(0.0, 1.0)
+        video[:overlap_video.shape[0]] = video[:overlap_video.shape[0]]*((1.0 - mix)[:, np.newaxis, np.newaxis, np.newaxis]) + overlap_video*mix[:, np.newaxis, np.newaxis, np.newaxis]
         latent = vae.encode(video[:, :, :, :3])
 
         # image = torch.ones((length, height, width, 3)) * 0.5
         # mask = torch.ones((1, 1, latent.shape[2] * 4, latent.shape[-2], latent.shape[-1]))
 
-        # if video is not None:
-        #     image[:video.shape[0]] = video
-        #     mask[:, :, :video.shape[0] + 3] = mask_strength
-
-        # concat_latent_image = vae.encode(image[:, :, :, :3])
-        # mask = mask.view(1, mask.shape[2] // 4, 4, mask.shape[3], mask.shape[4]).transpose(1, 2)
-        # positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
-        # negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
-
-        # clip_vision_output = None
-        # if clip_vision_start_image is not None:
-        #     clip_vision_output = clip_vision_start_image
-
-        # if clip_vision_output is not None:
-        #     positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision_output})
-        #     negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_vision_output})
-
         out_latent = {}
         out_latent["samples"] = latent
+
+        mask = torch.ones([latent.shape[0], 1, ((length - 1) // 4) + 1, latent.shape[-2], latent.shape[-1]], device=comfy.model_management.intermediate_device())
+        mask[:, :, :((mask_frames - 25) // 4) + 1] *= 0.0 
+        mask[:, :, ((mask_frames - 25) // 4) + 1:((mask_frames - 17) // 4) + 1] *= 0.25
+        mask[:, :, ((mask_frames - 17) // 4) + 1:((mask_frames - 9) // 4) + 1] *= 0.5
+        mask[:, :, ((mask_frames - 9) // 4) + 1:((mask_frames - 1) // 4) + 1] *= 0.75
+        out_latent["noise_mask"] = mask.repeat((batch_size, ) + (1,) * (mask.ndim - 1))
+            # mask = torch.ones((1, 1, latent.shape[2] * 4, latent.shape[-2], latent.shape[-1]))
+            # mask[:, :, :mask_frames] = 0.0
+
+            # mask = mask.view(1, mask.shape[2] // 4, 4, mask.shape[3], mask.shape[4]).transpose(1, 2)
+            # positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": latent, "concat_mask": mask})
+            # negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": latent, "concat_mask": mask})
+
         return io.NodeOutput(positive, negative, out_latent)
 
 class KMNodesExtension(ComfyExtension):
@@ -640,12 +779,15 @@ class KMNodesExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             KM_WanVideoToVideo,
+            KM_Resize_Image,
+            KM_Resize_Image_With_Model, 
             KM_Downscale_Image,
             KM_WanImageToVideo,
             KM_Safe_Mask_Bounds,
             KM_Safe_SEGS_Bounds,
             KM_Merge_Images,
             KM_Aspect_Ratio_Selector,
+            KM_Aspect_Ratio_Selector2,
             KM_Video_Image_Color_Match,
             KM_Color_Correct,
         ]
