@@ -178,7 +178,7 @@ class KM_Safe_SEGS_Bounds(io.ComfyNode):
         )
 
 
-# comfy really needs fist class support for looping
+# very simple based on similar from VHS
 class KM_Merge_Images(io.ComfyNode):
     @classmethod
     @override
@@ -187,16 +187,15 @@ class KM_Merge_Images(io.ComfyNode):
             node_id="KM_Merge_Images",
             category="KMNodes",
             description=(
-                "Merge two sets of images with support for Video Helper Suite meta_batch manager. "
-                "I forget if this works or not as I have not used it in a bit. "
+                "Merge two sets of images"
             ),
             inputs=[
                 io.Image.Input("images_A"),
                 io.Image.Input("images_B"),
-                io.AnyType.Input("meta_batch", optional=True),
             ],
             outputs=[
                 io.Image.Output(display_name="merged_image"),
+                io.Int.Output(display_name="count")
             ],
             hidden=[
                 io.Hidden.unique_id,
@@ -206,45 +205,95 @@ class KM_Merge_Images(io.ComfyNode):
     @classmethod
     @override
     def execute(
-        cls, images_A: Tensor, images_B: Tensor, meta_batch=None, unique_id=None
+        cls, images_A: Tensor, images_B: Tensor,
     ) -> io.NodeOutput:
-        # handle non batched case
-        if meta_batch is None:
-            images = []
-            images.append(images_A)
-            images.append(images_B)
-            all_images = torch.cat(images, dim=0)
-            return (all_images,)
-
-        # if here, then we have a meta_batch
-        # for inp in prompt[unique_id]['inputs'].values():
-
-        # for output_uid in prompt:
-        #     if prompt[output_uid]['class_type'] in ["VHS_VideoCombine"]:
-        #         for inp in prompt[output_uid]['inputs'].values():
-        #             if inp == [bm_uid, 0]:
-        #                 managed_outputs+=1
-
-        if unique_id not in meta_batch.inputs:
-            frames_done = 0
-            meta_batch.inputs[unique_id] = frames_done
-        else:
-            frames_done = meta_batch.inputs[unique_id]
-
-        # print(f"\033[96mTotal: {meta_batch.total_frames}, done: {frames_done}, shape: {images_A.shape}, id: {unique_id}\033[0m")
-
         images = []
         images.append(images_A)
-        frames_done += images_A.shape[0]
-        meta_batch.inputs[unique_id] = frames_done
-
-        if frames_done >= meta_batch.total_frames:
-            meta_batch.inputs.pop(unique_id)
-            images.append(images_B)
-
+        images.append(images_B)
         all_images = torch.cat(images, dim=0)
-        return (all_images,)
+        return (all_images, all_images.size(0),)
 
+# very simple based on similar from VHS
+class KM_Split_Images(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Split_Images",
+            category="KMNodes",
+            description=(
+                "Select a specific image from a set of images. "
+                "The selected image is determined by the provided index."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Images to select from.",
+                ),
+                io.Int.Input(
+                    "split_index",
+                    default=0,
+                    min=0,
+                    tooltip="Index at which to split the images.",
+                ),  
+            ],
+            outputs=[
+                io.Image.Output(display_name="image_a"),
+                io.Int.Output(display_name="a_count"),
+                io.Image.Output(display_name="image_b"),
+                io.Int.Output(display_name="b_count"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, images, split_index: int) -> io.NodeOutput:
+        return (images[:split_index], split_index, images[split_index:], images.size(0) - split_index)
+
+class KM_Extract_Images(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Extract_Images",
+            category="KMNodes",
+            description=(
+                "Extract a subset of images from a set of images. "
+                ),
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Images to select from.",
+                ),
+                io.Int.Input(
+                    "start_index",
+                    default=0,
+                    min=0,
+                    tooltip="Index at which to start extracting images.",
+                ),  
+                io.Int.Input(
+                    "length",
+                    default=1,
+                    min=1,
+                    tooltip="Number of images to extract.",
+                ),  
+                io.Int.Input(
+                    "stride",
+                    default=1,
+                    min=1,
+                    tooltip="Step size for extracting images.",
+                ),  
+            ],
+            outputs=[
+                io.Image.Output(display_name="extracted_images"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, images, start_index: int, length: int, stride: int) -> io.NodeOutput:
+        end_index = start_index + length*stride
+        return (images[start_index:end_index:stride],)
 
 class KM_Aspect_Ratio_Selector(io.ComfyNode):
     RATIO = [
@@ -456,7 +505,7 @@ class KM_Video_Image_Color_Match(io.ComfyNode):
             )
         else:
             color_stats = cls.analyze_color_statistics(
-                reference[-1:], images[-1:], color_space
+                reference[:1], images[-match_index: -match_index + 1], color_space
             )
 
         # Apply color transformation
@@ -586,6 +635,215 @@ class KM_Video_Image_Color_Match(io.ComfyNode):
             rgb_new = kornia.color.linear_rgb_to_rgb(rgb_new)
 
         return rgb_new
+
+
+class KM_Color_Match(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Color_Match",
+            category="KMNodes",
+            description=(
+                "Match the colors of a set of images to a single reference image. "
+                "Computes color statistics from the reference image compared to the "
+                "first input frame, then applies the derived transformation to all "
+                "input images."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Images to be color matched.",
+                ),
+                io.Image.Input(
+                    "reference_image",
+                    tooltip="Single reference image defining the target color profile.",
+                ),
+                io.Float.Input(
+                    "factor",
+                    default=1.0,
+                    min=0.0,
+                    max=1.0,
+                    step=0.05,
+                    tooltip="How much correction to apply",
+                ),
+                io.Combo.Input(
+                    "color_space",
+                    options=["HLS", "LAB", "Linear", "RGB", "LS-LS"],
+                    default="LS-LS",
+                    tooltip="Color space to use for matching",
+                ),
+                io.Combo.Input(
+                    "device",
+                    options=["auto", "cpu", "gpu"],
+                    tooltip="Device to use for computation",
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="result"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, images, reference_image, factor, color_space, device) -> io.NodeOutput:
+        if "gpu" == device:
+            device = comfy.model_management.get_torch_device()
+        elif "auto" == device:
+            device = comfy.model_management.intermediate_device()
+        else:
+            device = "cpu"
+
+        # Ensure images are in the correct shape (B, C, H, W)
+        reference_image = reference_image.permute([0, 3, 1, 2]).to(device)
+        images = images.permute([0, 3, 1, 2]).to(device)
+
+        # Derive color stats by comparing the reference image against the first input frame
+        color_stats = KM_Video_Image_Color_Match.analyze_color_statistics(
+            reference_image[:1],
+            images[:1],
+            color_space,
+        )
+
+        # Apply color transformation to all frames
+        result = KM_Video_Image_Color_Match.apply_color_transformation(images, color_stats, color_space)
+
+        # Apply factor blend between corrected and original
+        result = factor * result + (1 - factor) * images
+
+        # Convert back to (B, H, W, C) format and clamp to [0, 1]
+        result = (
+            result.permute(0, 2, 3, 1)
+            .clamp(0, 1)
+            .to(comfy.model_management.intermediate_device())
+        )
+
+        return (result,)
+
+class KM_Select_Image(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Select_Image",
+            category="KMNodes",
+            description=(
+                "Select a specific image from a set of images. "
+                "The selected image is determined by the provided index."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Images to select from.",
+                ),
+                io.Int.Input(
+                    "selected_index",
+                    default=0,
+                    min=0,
+                    tooltip="Index of the image to select.",
+                ),  
+            ],
+            outputs=[
+                io.Image.Output(display_name="result"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, images, selected_index: int) -> io.NodeOutput:
+        return (images[selected_index:selected_index+1],)
+
+class KM_Select_Every_Nth_Image(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Select_Every_Nth_Image",
+            category="KMNodes",
+            description=(
+                "Returns every Nth image from a set of images, optionally skipping the first few images."
+                "The selected images are determined by the provided index and stride."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Images to select from.",
+                ),
+                io.Int.Input(
+                    "select_every_nth",
+                    default=1,
+                    min=1,
+                    tooltip="Select every Nth image.",
+                ),
+                io.Int.Input(
+                    "skip_first_images",
+                    default=0,
+                    min=0,
+                    tooltip="Number of images to skip before starting selection.",
+                ),  
+            ],
+            outputs=[
+                io.Image.Output(display_name="result"),
+                io.Int.Output(display_name="count"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, images, select_every_nth: int, skip_first_images: int) -> io.NodeOutput:
+        sub_images = images[skip_first_images::select_every_nth]
+        return (sub_images, sub_images.size(0))
+
+class KM_Video_Blend(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Video_Blend",
+            category="KMNodes",
+            description=(
+                "Blend reference overlap frames into the input images. "
+                "Each reference frame is blended into its corresponding position in "
+                "images using a linear gradient so the transition is smooth. "
+                "reference_location controls whether the overlap is at the start or end."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Input images (e.g. AI-generated frames).",
+                ),
+                io.Image.Input(
+                    "reference",
+                    tooltip="Reference overlap frames to blend into the images.",
+                ),
+                io.Combo.Input(
+                    "reference_location",
+                    options=["start", "end"],
+                    tooltip="Whether the reference frames overlap the start or end of images.",
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="result"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, images, reference, reference_location) -> io.NodeOutput:
+        result = images.clone()
+
+        num_refs = reference.shape[0]
+        for i in range(num_refs):
+            blend_factor = (i + 1.0) / (num_refs + 1.0)
+            if reference_location == "start":
+                result[i] = (
+                    blend_factor * result[i] + (1.0 - blend_factor) * reference[i]
+                )
+            else:
+                j = result.shape[0] - reference.shape[0] + i
+                result[j] = (1.0 - blend_factor) * result[j] + blend_factor * reference[i]
+
+        return (result,)
 
 
 class KM_Color_Correct(io.ComfyNode):
@@ -867,7 +1125,6 @@ class KM_Resize_Image(io.ComfyNode):
 
         return (result,)
 
-
 class KM_Resize_Image_With_Model(io.ComfyNode):
     @classmethod
     @override
@@ -1062,6 +1319,8 @@ class KMNodesExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            KM_Select_Image,
+            KM_Select_Every_Nth_Image,
             KM_WanVideoToVideo,
             KM_Resize_Image,
             KM_Resize_Image_With_Model,
@@ -1070,9 +1329,13 @@ class KMNodesExtension(ComfyExtension):
             KM_Safe_Mask_Bounds,
             KM_Safe_SEGS_Bounds,
             KM_Merge_Images,
+            KM_Split_Images,
+            KM_Extract_Images,
             KM_Aspect_Ratio_Selector,
             KM_Aspect_Ratio_Selector2,
             KM_Video_Image_Color_Match,
+            KM_Color_Match,
+            KM_Video_Blend,
             KM_Color_Correct,
             KM_CFGGuider,
         ]
