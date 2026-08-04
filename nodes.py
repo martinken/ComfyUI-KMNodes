@@ -295,35 +295,79 @@ class KM_Extract_Images(io.ComfyNode):
         end_index = start_index + length*stride
         return (images[start_index:end_index:stride],)
 
+class KM_Trim_Images(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Trim_Images",
+            category="KMNodes",
+            description=(
+                "Trim images from the start and end of a set of images, "
+                "optionally selecting every nth image."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Images to trim.",
+                ),
+                io.Int.Input(
+                    "start_trim",
+                    default=0,
+                    min=0,
+                    tooltip="Number of images to remove from the start.",
+                ),
+                io.Int.Input(
+                    "end_trim",
+                    default=0,
+                    min=0,
+                    tooltip="Number of images to remove from the end.",
+                ),
+                io.Int.Input(
+                    "stride",
+                    default=1,
+                    min=1,
+                    tooltip="Step size for selecting images.",
+                ),
+            ],
+            outputs=[
+                io.Image.Output(display_name="trimmed_images"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, images, start_trim: int, end_trim: int, stride: int) -> io.NodeOutput:
+        end_index = images.shape[0] - end_trim if end_trim > 0 else None
+        return (images[start_trim:end_index:stride],)
+
 class KM_Aspect_Ratio_Selector(io.ComfyNode):
     RATIO = [
-        ("=== commonly used ===", 960, 960),
         ("Match Input Image", 960, 960),
         (".7M  4:3  960, 720", 960, 720),
-        (".9M  1:1  960, 960 - wan", 960, 960),
-        (".9M  4:3 1088, 816 - wan", 1088, 816),
-        (".9M 16:9 1280, 720 - wan", 1280, 720),
-        (" 1M  1:1 1024,1024", 1024, 1024),
-        (" 1M  4:3 1152, 864", 1152, 864),
-        (" 1.2M  4:3 1280, 960", 1280, 960),
-        (" 1.5M  4:3 1408, 1056", 1408, 1056),
-        (" 2M  1:1 1440,1440", 1440, 1440),
-        (" 2M  4:3 1632,1440", 1632, 1224),
-        (" 2M 16:9 1920,1080", 1920, 1080),
-        (" 4M  1:1 2048,2048", 2048, 2048),
-        (" 4M  4:3 2304,1728", 2304, 1728),
-        (" 4M 16:9 2560,1440", 2560, 1440),
-        ("=== other values ===", 960, 960),
+        (".9M  1:1  960, 960", 960, 960),
+        (".9M  4:3 1088, 816", 1088, 816),
+        (".9M  3:2 1200, 800", 1200, 800),
+        (".9M 16:9 1280, 720", 1280, 720),
         (".9M  2:3  800,1200", 800, 1200),
-        (".9M  3:2 1200,800", 1200, 800),
-        (" 1M  9:16  720,1280", 720, 1280),
-        (" 1M 21:9 1720,720", 1720, 720),
-        ("1.8M 1:1 1328,1328 - qwen", 1328, 1328),
-        ("1.8M 4:3 1472,1104 - qwen", 1472, 1104),
-        ("1.8M 16:9 1664,928 - qwen", 1664, 928),
-        (" 2M  9:16 1080,1920", 1080, 1920),
-        (" 2M 21:9 2048,864", 2048, 864),
+        (".9M  9:16 720,1280", 720, 1280),
+        ("1M   1:1 1024,1024", 1024, 1024),
+        ("1M   4:3 1152, 864", 1152, 864),
+        ("1M  21:9 1720, 720", 1720, 720),
+        ("1.2M 4:3 1280, 960", 1280, 960),
+        ("1.8M 1:1 1328,1328", 1328, 1328),
+        ("1.8M 4:3 1472,1104", 1472, 1104),
+        ("1.8M 16:9 1664,928", 1664, 928),
+        ("2M   1:1 1440,1440", 1440, 1440),
+        ("2M   4:3 1632,1440", 1632, 1224),
+        ("2M  16:9 1920,1080", 1920, 1080),
+        ("2M  21:9 2048, 864", 2048, 864),
+        ("2M   9:16 1080,1920", 1080, 1920),
         ("2.4M 1:1 1536,1536", 1536, 1536),
+        ("3M  16:9 2304,1296", 2304, 1296),
+        ("4M   1:1 2048,2048", 2048, 2048),
+        ("4M   4:3 2304,1728", 2304, 1728),
+        ("4M  16:9 2560,1440", 2560, 1440),
     ]
 
     @classmethod
@@ -397,7 +441,7 @@ class KM_Aspect_Ratio_Selector2(io.ComfyNode):
                     tooltip="Aspect ratio of generated image.",
                 ),
                 io.Float.Input(
-                    "megapixels", default=1.0, min=0, max=8, step=0.5, optional=True
+                    "megapixels", default=1.0, min=0, max=8, step=0.1, optional=True
                 ),
             ],
             outputs=[
@@ -412,10 +456,41 @@ class KM_Aspect_Ratio_Selector2(io.ComfyNode):
     def execute(cls, aspect_ratio, megapixels) -> io.NodeOutput:
         for title, w, h in cls.RATIO:
             if title == aspect_ratio:
-                factor = 16 * int(np.sqrt((megapixels * 1_000_000) / (w * h)) / 16.0)
+                factor = 32 * int(np.sqrt((megapixels * 1_048_576) / (w * h)) / 32.0)
                 return (title, w * factor, h * factor)
         return (aspect_ratio, 512, 512)
 
+
+class KM_Image_Size(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_Image_size",
+            category="KMNodes",
+            inputs=[
+                io.Boolean.Input("use_image", default=True),
+                io.Int.Input("width", default=512, min=0, max=4096, optional=True),
+                io.Int.Input("height", default=512, min=0, max=4096, optional=True),
+                io.Image.Input("optional_image", optional=True),
+            ],
+            outputs=[
+                io.Int.Output(display_name="width"),
+                io.Int.Output(display_name="height"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, use_image, width=512, height=512, optional_image=None) -> io.NodeOutput:
+        if use_image and optional_image is not None:
+            return (
+                f"Match Input Image {optional_image.size(2)}x{optional_image.size(1)}",
+                optional_image.size(2),
+                optional_image.size(1),
+            )
+
+        return (width, height)
 
 class KM_Video_Image_Color_Match(io.ComfyNode):
     @classmethod
@@ -1315,6 +1390,51 @@ class KM_CFGGuider(io.ComfyNode):
 
     get_guider = execute
 
+
+# based off swarm lora loader
+class KM_LoraLoader(io.ComfyNode):
+    @classmethod
+    @override
+    def define_schema(cls):
+        return io.Schema(
+            node_id="KM_LoraLoader",
+            category="KMNodes",
+            description=(
+                "Load a comma separated list of Loras and Strengths"
+            ),
+            inputs=[
+                io.Model.Input("model"),
+                io.Clip.Input("clip"),
+                io.String.Input("lora_names", multiline=True),
+                io.String.Input("lora_weights", multiline=True),
+            ],
+            outputs=[io.Model.Output(), io.Clip.Output()]
+        )
+
+    @classmethod
+    @override
+    def execute(cls, model, clip, lora_names, lora_weights) -> io.NodeOutput:
+        import folder_paths
+
+        if lora_names.strip() == "":
+            return (model, clip)
+
+        lora_names = lora_names.split(",")
+        lora_weights = lora_weights.split(",")
+        lora_weights = [float(x.strip()) for x in lora_weights]
+
+        for i in range(len(lora_names)):
+            lora_name = lora_names[i].strip()
+            weight = lora_weights[i]
+            if weight == 0:
+                continue
+            lora_path = folder_paths.get_full_path("loras", lora_name)
+            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            model, clip = comfy.sd.load_lora_for_models(model, clip, lora, weight, weight)
+
+        return (model, clip)
+
+
 class KMNodesExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -1331,15 +1451,17 @@ class KMNodesExtension(ComfyExtension):
             KM_Merge_Images,
             KM_Split_Images,
             KM_Extract_Images,
+            KM_Trim_Images,
             KM_Aspect_Ratio_Selector,
             KM_Aspect_Ratio_Selector2,
+            KM_Image_Size,
             KM_Video_Image_Color_Match,
             KM_Color_Match,
             KM_Video_Blend,
             KM_Color_Correct,
             KM_CFGGuider,
+            KM_LoraLoader,
         ]
-
 
 async def comfy_entrypoint() -> KMNodesExtension:
     return KMNodesExtension()
